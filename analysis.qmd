@@ -1,0 +1,200 @@
+# Libraries
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+library(patchwork)
+```
+
+# Loading our data
+
+## Function to extract our sample names
+
+```{r}
+data.dir <- 'data/'
+
+extract_sample_names <- function(data_dir, file_pattern = "_features\\.tsv\\.gz$") {
+  # Get all feature files in the directory
+  feature_files <- list.files(data_dir, pattern = file_pattern, full.names = FALSE)
+  
+  # Extract sample names by removing the suffix
+  sample_names <- gsub(file_pattern, "", feature_files)
+  
+  # Return sorted sample names
+  return(sort(sample_names))
+}
+
+sample_names <- extract_sample_names('data/')
+```
+
+## Function to load the data
+
+```{r}
+if (!file.exists('data/seurat_objs.Rdata')){
+    seurat_list = list()
+
+    read_10X_with_prefix <- function(sample_names, data_dir){
+        matrix.path <- file.path(data_dir,paste0(sample_names, "_matrix.mtx.gz"))
+        features.path <- file.path(data_dir, paste0(sample_names, "_features.tsv.gz"))
+        barcodes.path <- file.path(data_dir, paste0(sample_names, "_barcodes.tsv.gz"))
+
+        if(all(file.exists(c(matrix.path, features.path, barcodes.path)))) {
+            temp_dir <- file.path(tempdir(), sample_names)
+            dir.create(temp_dir, showWarnings = FALSE)
+
+            file.copy(matrix.path, file.path(temp_dir, 'matrix.mtx.gz'))
+            file.copy(features.path, file.path(temp_dir, 'features.tsv.gz'))
+            file.copy(barcodes.path, file.path(temp_dir, 'barcodes.tsv.gz'))
+
+            counts <- Read10X(data.dir = temp_dir)
+
+            unlink(temp_dir, recursive = TRUE)
+
+            return(counts)
+        } else {
+            stop(paste("Files not found for sample:", sample_name))
+        }
+    }
+    for (sample_name in sample_names){
+        counts <- read_10X_with_prefix(sample_name, data.dir)
+
+        seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name, min.cells = 3, min.features = 200)
+
+        seurat_obj$sample <- sample_name
+        seurat_list[[sample_name]] <- seurat_obj
+    }
+    save(seurat_list, file = 'data/seurat_objs.Rdata')
+}
+
+```
+
+# Merge our seurat objects into 1
+
+```{r}
+load('data/seurat_objs.Rdata')
+
+if (length(seurat_list) > 1){
+    merged_seurat <- merge(seurat_list[[1]],
+                            y = seurat_list[2:length(seurat_list)],
+                            add.cell.ids = names(seurat_list),
+                            project = "Merged_Seurat_Object"
+                    )
+} else {
+    merged_seurat <- seurat_list[[1]]
+}
+
+cat("Merged dataset: ", ncol(merged_seurat), " cells, ", nrow(merged_seurat), " genes\n")
+```
+
+# Exploratory Data Analysis
+
+```{r}
+merged_seurat[['percent_mt']] <- PercentageFeatureSet(merged_seurat, patter = '^MT-')
+merged_seurat[['percent_rb']] <- PercentageFeatureSet(merged_seurat, pattern = '^RP[SL]')
+merged_seurat$log10GenesPerUMI <- log10(merged_seurat$nFeature_RNA) / log10(merged_seurat$nCount_RNA)
+
+head(merged_seurat@meta.data)
+```
+
+## QC Visualization
+
+
+```{r}
+create_violin_plots <- function(seurat_list){
+    plot_list <- list()
+
+    for (sample_name in names(seurat_list)){
+        sample.obj <- seurat_list[[sample_name]]
+
+        sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
+        sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
+        sample.obj$log10GenesPerUMI <- log10(sample.obj$nFeature_RNA) / log10(sample.obj$nCount_RNA)
+
+        vln <- VlnPlot(sample.obj, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), cols = 3, pt.size = 0.1) +
+            plot_annotation(title = paste("QC Metrics -", sample_name))
+
+        plot_list[[sample_name]] <- vln
+    }
+    return(plot_list)
+}
+
+vln_plots <- create_violin_plots(seurat_list)
+
+# Combine, save, and view in one go
+combined_plot <- wrap_plots(vln_plots, ncol = 3)
+ggsave("violin_plots_before_qc.png", combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+```
+
+## Feature Scatter Plots
+
+```{r}
+create_feature_scatter_plots <- function(seurat_list){
+    plot_list <- list()
+
+    for (sample_name in names(seurat_list)){
+        sample.obj <- seurat_list[[sample_name]]
+
+        sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
+        sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
+        sample.obj$log10GenesPerUMI <- log10(sample.obj$nFeature_RNA) / log10(sample.obj$nCount_RNA)
+
+        scatter1 <- FeatureScatter(sample.obj, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
+        scatter2 <- FeatureScatter(sample.obj, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
+
+        scatter <- scatter1 + scatter2
+        plot_list[[sample_name]] <- scatter
+    }
+    return(plot_list)
+}
+
+scatter_plots <- create_feature_scatter_plots(seurat_list)
+combined_plot <- wrap_plots(scatter_plots)
+ggsave('scatter_plots_before_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+```
+
+# Filtering the cells and genes
+
+```{r}
+max_genes <- 5000
+min_genes <- 500
+max_UMI <- 20000
+min_UMI <- 100
+max_percent_mt <- 20
+min_percent_mt <- 1
+
+for (sample_name in names(seurat_list)){
+
+    sample.obj<- seurat_list[[sample_name]]
+
+    sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
+
+    sample.obj <- subset(sample.obj, subset = nFeature_RNA > min_genes &
+                                                    nFeature_RNA < max_genes &
+                                                    nCount_RNA > min_UMI &
+                                                    nCount_RNA < max_UMI &
+                                                    percent_mt < max_percent_mt &
+                                                    percent_mt > min_percent_mt)
+    
+    seurat_list[[sample_name]] <- sample.obj
+}
+
+merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > min_genes &
+                                                nFeature_RNA < max_genes &
+                                                nCount_RNA > min_UMI &
+                                                nCount_RNA < max_UMI &
+                                                percent_mt < max_percent_mt &
+                                                percent_mt > min_percent_mt)
+```
+
+## Performing QC again
+
+```{r}
+vln_plots_after_qc <- create_violin_plots(seurat_list)
+combined_plot <- wrap_plots(vln_plots_after_qc)
+ggsave('violin_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+
+scatter_plots_after_qc <- create_feature_scatter_plots(seurat_list)
+combined_plot <- wrap_plots(scatter_plots_after_qc)
+ggsave('scatter_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+```
