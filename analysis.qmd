@@ -85,6 +85,7 @@ if (length(seurat_list) > 1){
 }
 
 cat("Merged dataset: ", ncol(merged_seurat), " cells, ", nrow(merged_seurat), " genes\n")
+seurat_list.names <- names(seurat_list)
 ```
 
 # Exploratory Data Analysis
@@ -179,7 +180,11 @@ for (sample_name in names(seurat_list)){
     
     seurat_list[[sample_name]] <- sample.obj
 }
+```
 
+## Filtering the merged seurat object
+
+```{r}
 merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > min_genes &
                                                 nFeature_RNA < max_genes &
                                                 nCount_RNA > min_UMI &
@@ -216,7 +221,8 @@ merged_seurat <- FindVariableFeatures(merged_seurat,
 seurat_list <- lapply(X = seurat_list, FUN=function(X){
     X <-  NormalizeData(X, normalization.method = 'LogNormalize', scale.factor = 10000)
     X <- FindVariableFeatures(X, selection.method = 'vst', nfeatures = 2000)
-})                                     
+})
+names(seurat_list) <- seurat_list.names
 ```
 
 
@@ -241,10 +247,15 @@ for (sample_name in names(seurat_list)){
     
     seurat_list[[sample_name]] <- sample.obj
 }
+
+seurat_list <- lapply(X = seurat_list, FUN = function(X){
+    sample.genes <- rownames(X)
+    X <- ScaleData(X, features = sample.genes)
+})
+names(seurat_list) <- seurat_list.names
 ```
 
 # Principal Component Analysis
-
 
 ```{r}
 if (!file.exists('data/merged_seurat_after_pca.rds')){
@@ -253,5 +264,38 @@ saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
 } else{
     merged_seurat <- readRDS('data/merged_seurat_after_pca.rds')
 }
-saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
+
+seurat_list <- lapply(X = names(seurat_list), FUN = function(name){
+    X <- seurat_list[[name]]
+    cat(paste0("\nSeurat Object Name:\t",name,'\n'))
+    X <- RunPCA(X, features = VariableFeatures(X))
+})
+names(seurat_list) <- seurat_list.names
+```
+
+## PCA Plots
+```{r}
+plot_PCA <- function(seurat_list){
+    pca_plots <- list()
+
+    for (sample_name in sample_names) {
+        sample.obj <- seurat_list[[sample_name]]
+        
+        pca.plot <-  DimPlot(sample.obj, reduction = 'pca', pt.size = 0.6) +
+            ggtitle(paste0('PCA - ', sample_name))
+        
+        pca_plots[[sample_name]] <- pca.plot
+    }
+    return(pca_plots)
+}
+pca.plots <- plot_PCA(seurat_list)
+combined_plot <- wrap_plots(pca.plots)
+ggsave('plots/PCA_plots.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+```
+
+## Integration
+
+```{r}
+features <- SelectIntegrationFeatures(seurat_list)
+anchors <- FindIntegrationAnchors(seurat_list, anchor.features = features)
 ```
