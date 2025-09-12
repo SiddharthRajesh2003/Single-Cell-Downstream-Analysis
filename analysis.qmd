@@ -123,7 +123,7 @@ vln_plots <- create_violin_plots(seurat_list)
 
 # Combine, save, and view in one go
 combined_plot <- wrap_plots(vln_plots, ncol = 3)
-ggsave("violin_plots_before_qc.png", combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+ggsave("plots/violin_plots_before_qc.png", combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
 ```
 
 ## Feature Scatter Plots
@@ -150,7 +150,7 @@ create_feature_scatter_plots <- function(seurat_list){
 
 scatter_plots <- create_feature_scatter_plots(seurat_list)
 combined_plot <- wrap_plots(scatter_plots)
-ggsave('scatter_plots_before_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+ggsave('plots/scatter_plots_before_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
 ```
 
 # Filtering the cells and genes
@@ -168,6 +168,7 @@ for (sample_name in names(seurat_list)){
     sample.obj<- seurat_list[[sample_name]]
 
     sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
+    sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
 
     sample.obj <- subset(sample.obj, subset = nFeature_RNA > min_genes &
                                                     nFeature_RNA < max_genes &
@@ -192,9 +193,65 @@ merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > min_genes &
 ```{r}
 vln_plots_after_qc <- create_violin_plots(seurat_list)
 combined_plot <- wrap_plots(vln_plots_after_qc)
-ggsave('violin_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+ggsave('plots/violin_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
 
 scatter_plots_after_qc <- create_feature_scatter_plots(seurat_list)
 combined_plot <- wrap_plots(scatter_plots_after_qc)
-ggsave('scatter_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+ggsave('plots/scatter_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+```
+
+# Data Normalization
+
+```{r}
+merged_seurat <- NormalizeData(merged_seurat, normalization.method = 'LogNormalize', scale.factor = 10000)
+```
+
+# Finding the variable features in each sample
+
+```{r}
+merged_seurat <- FindVariableFeatures(merged_seurat, 
+                                     selection.method = "vst", 
+                                     nfeatures = 2000)
+                                     
+seurat_list <- lapply(X = seurat_list, FUN=function(X){
+    X <-  NormalizeData(X, normalization.method = 'LogNormalize', scale.factor = 10000)
+    X <- FindVariableFeatures(X, selection.method = 'vst', nfeatures = 2000)
+})                                     
+```
+
+
+```{r}
+top10 <- head(VariableFeatures(merged_seurat), 10)
+plot1 <- VariableFeaturePlot(merged_seurat)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+
+
+```{r}
+all_genes <- rownames(merged_seurat)
+merged_seurat <- ScaleData(merged_seurat, features = all_genes)
+
+for (sample_name in names(seurat_list)){
+
+    sample.obj<- seurat_list[[sample_name]]
+
+    sample.genes <- rownames(sample.obj)
+    sample.obj <- ScaleData(sample.obj, features = sample.genes)
+    
+    seurat_list[[sample_name]] <- sample.obj
+}
+```
+
+# Principal Component Analysis
+
+
+```{r}
+if (!file.exists('data/merged_seurat_after_pca.rds')){
+merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(object = merged_seurat))
+saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
+} else{
+    merged_seurat <- readRDS('data/merged_seurat_after_pca.rds')
+}
+saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
 ```
