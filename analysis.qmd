@@ -170,6 +170,7 @@ for (sample_name in names(seurat_list)){
 
     sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
     sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
+    sample.obj$log10GenesPerUMI <- log10(sample.obj$nFeature_RNA) / log10(sample.obj$nCount_RNA)
 
     sample.obj <- subset(sample.obj, subset = nFeature_RNA > min_genes &
                                                     nFeature_RNA < max_genes &
@@ -233,20 +234,11 @@ plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
 plot2
 ```
 
+# Scaling our data
 
 ```{r}
 all_genes <- rownames(merged_seurat)
 merged_seurat <- ScaleData(merged_seurat, features = all_genes)
-
-for (sample_name in names(seurat_list)){
-
-    sample.obj<- seurat_list[[sample_name]]
-
-    sample.genes <- rownames(sample.obj)
-    sample.obj <- ScaleData(sample.obj, features = sample.genes)
-    
-    seurat_list[[sample_name]] <- sample.obj
-}
 
 seurat_list <- lapply(X = seurat_list, FUN = function(X){
     sample.genes <- rownames(X)
