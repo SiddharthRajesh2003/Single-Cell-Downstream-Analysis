@@ -1,46 +1,48 @@
-# Libraries
+# Loading our neccessary libraries
 
 ```{r}
 library(Seurat)
 library(ggplot2)
 library(tidyverse)
 library(patchwork)
+library(pheatmap)
+```
+
+## Create plots directory if it doesn't exist
+
+```{r}
+if (!dir.exists("plots")) dir.create('plots')
 ```
 
 # Loading our data
 
-## Function to extract our sample names
-
 ```{r}
 data.dir <- 'data/'
 
-extract_sample_names <- function(data_dir, file_pattern = "_features\\.tsv\\.gz$") {
-  # Get all feature files in the directory
-  feature_files <- list.files(data_dir, pattern = file_pattern, full.names = FALSE)
-  
-  # Extract sample names by removing the suffix
-  sample_names <- gsub(file_pattern, "", feature_files)
-  
-  # Return sorted sample names
-  return(sort(sample_names))
+extract_sample_names <- function(data.dir, file_pattern = "_features\\.tsv\\.gz$") {
+    feature.files <- list.files(data.dir, pattern = file_pattern, full.names = FALSE)
+    sample_names <- gsub(file_pattern, "", feature.files)
+    return(sort(sample_names))
 }
 
-sample_names <- extract_sample_names('data/')
+sample_names <- extract_sample_names(data.dir)
+cat("Found ", length(sample_names), "samples\n")
+print(sample_names)
 ```
 
-## Function to load the data
+## Load individual samples as Seurat Objects
 
 ```{r}
 if (!file.exists('data/seurat_objs.Rdata')){
-    seurat_list = list()
+    seurat_list <- list()
 
-    read_10X_with_prefix <- function(sample_names, data_dir){
-        matrix.path <- file.path(data_dir,paste0(sample_names, "_matrix.mtx.gz"))
-        features.path <- file.path(data_dir, paste0(sample_names, "_features.tsv.gz"))
-        barcodes.path <- file.path(data_dir, paste0(sample_names, "_barcodes.tsv.gz"))
+    read_10X_with_prefix <- function(sample_name, data_dir){
+        matrix.path <- file.path(data_dir, paste0(sample_name, "_matrix.mtx.gz"))
+        features.path <- file.path(data_dir, paste0(sample_name, "_features.tsv.gz"))
+        barcodes.path <- file.path(data_dir, paste0(sample_name, "_barcodes.tsv.gz"))
 
         if(all(file.exists(c(matrix.path, features.path, barcodes.path)))) {
-            temp_dir <- file.path(tempdir(), sample_names)
+            temp_dir <- file.path(tempdir(), sample_name)
             dir.create(temp_dir, showWarnings = FALSE)
 
             file.copy(matrix.path, file.path(temp_dir, 'matrix.mtx.gz'))
@@ -48,7 +50,6 @@ if (!file.exists('data/seurat_objs.Rdata')){
             file.copy(barcodes.path, file.path(temp_dir, 'barcodes.tsv.gz'))
 
             counts <- Read10X(data.dir = temp_dir)
-
             unlink(temp_dir, recursive = TRUE)
 
             return(counts)
@@ -56,50 +57,34 @@ if (!file.exists('data/seurat_objs.Rdata')){
             stop(paste("Files not found for sample:", sample_name))
         }
     }
-    for (sample_name in sample_names){
-        counts <- read_10X_with_prefix(sample_name, data.dir)
 
+    for (sample_name in sample_names){
+        cat("Loading sample:", sample_name, "\n")
+        counts <- read_10X_with_prefix(sample_name, data.dir)
         seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name, min.cells = 3, min.features = 200)
 
+        # Add metadata
         seurat_obj$sample <- sample_name
+        # Extract group (Control or OSA) from sample name
+        if (grepl("Control", sample_name)) {
+            seurat_obj$Group <- "Control"
+        } else if (grepl("OSA", sample_name)) {
+            seurat_obj$Group <- "OSA"
+        } else {
+            seurat_obj$Group <- "Unknown"
+        }
+
         seurat_list[[sample_name]] <- seurat_obj
     }
     save(seurat_list, file = 'data/seurat_objs.Rdata')
-}
-
-```
-
-# Merge our seurat objects into 1
-
-```{r}
-load('data/seurat_objs.Rdata')
-
-if (length(seurat_list) > 1){
-    merged_seurat <- merge(seurat_list[[1]],
-                            y = seurat_list[2:length(seurat_list)],
-                            add.cell.ids = names(seurat_list),
-                            project = "Merged_Seurat_Object"
-                    )
 } else {
-    merged_seurat <- seurat_list[[1]]
+    load('data/seurat_objs.Rdata')
 }
 
-cat("Merged dataset: ", ncol(merged_seurat), " cells, ", nrow(merged_seurat), " genes\n")
-seurat_list.names <- names(seurat_list)
+cat("\nLoaded", length(seurat_list), "samples\n")
 ```
 
-# Exploratory Data Analysis
-
-```{r}
-merged_seurat[['percent_mt']] <- PercentageFeatureSet(merged_seurat, patter = '^MT-')
-merged_seurat[['percent_rb']] <- PercentageFeatureSet(merged_seurat, pattern = '^RP[SL]')
-merged_seurat$log10GenesPerUMI <- log10(merged_seurat$nFeature_RNA) / log10(merged_seurat$nCount_RNA)
-
-head(merged_seurat@meta.data)
-```
-
-## QC Visualization
-
+### Checking the Quality of the samples before performing QC
 
 ```{r}
 create_violin_plots <- function(seurat_list){
@@ -127,167 +112,389 @@ combined_plot <- wrap_plots(vln_plots, ncol = 3)
 ggsave("plots/violin_plots_before_qc.png", combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
 ```
 
-## Feature Scatter Plots
+## Performing QC on the samples
 
 ```{r}
-create_feature_scatter_plots <- function(seurat_list){
-    plot_list <- list()
+cat("\n=== Performing Quality Control ===\n")
 
-    for (sample_name in names(seurat_list)){
-        sample.obj <- seurat_list[[sample_name]]
-
-        sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
-        sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
-        sample.obj$log10GenesPerUMI <- log10(sample.obj$nFeature_RNA) / log10(sample.obj$nCount_RNA)
-
-        scatter1 <- FeatureScatter(sample.obj, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
-        scatter2 <- FeatureScatter(sample.obj, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
-
-        scatter <- scatter1 + scatter2
-        plot_list[[sample_name]] <- scatter
-    }
-    return(plot_list)
-}
-
-scatter_plots <- create_feature_scatter_plots(seurat_list)
-combined_plot <- wrap_plots(scatter_plots)
-ggsave('plots/scatter_plots_before_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
-```
-
-# Filtering the cells and genes
-
-```{r}
 max_genes <- 5000
 min_genes <- 500
 max_UMI <- 20000
 min_UMI <- 100
 max_percent_mt <- 20
-min_percent_mt <- 1
+min_percent_mt <- 0.5  # Changed from 1 to 0.5 to be less stringent
+
+qc_stats <- data.frame()
 
 for (sample_name in names(seurat_list)){
+    sample.obj <- seurat_list[[sample_name]]
 
-    sample.obj<- seurat_list[[sample_name]]
+    # Join layers if using Seurat v5
+    if (inherits(sample.obj[["RNA"]], "Assay5")) {
+      sample.obj[["RNA"]] <- JoinLayers(sample.obj[["RNA"]])
+    }
 
+    # Calculate QC metrics
     sample.obj[['percent_mt']] <- PercentageFeatureSet(sample.obj, pattern = '^MT-')
     sample.obj[['percent_rb']] <- PercentageFeatureSet(sample.obj, pattern = '^RP[SL]')
     sample.obj$log10GenesPerUMI <- log10(sample.obj$nFeature_RNA) / log10(sample.obj$nCount_RNA)
+    sample.obj@meta.data <- separate(sample.obj@meta.data, col='sample', into = c('Sample_ID', 'Group'), sep = '_')
 
+    # Record pre-filter stats
+    pre_cells <- ncol(sample.obj)
+
+    # Filter cells
     sample.obj <- subset(sample.obj, subset = nFeature_RNA > min_genes &
-                                                    nFeature_RNA < max_genes &
-                                                    nCount_RNA > min_UMI &
-                                                    nCount_RNA < max_UMI &
-                                                    percent_mt < max_percent_mt &
-                                                    percent_mt > min_percent_mt)
-    
+                                              nFeature_RNA < max_genes &
+                                              nCount_RNA > min_UMI &
+                                              nCount_RNA < max_UMI &
+                                              percent_mt < max_percent_mt &
+                                              percent_mt > min_percent_mt)
+
+    post_cells <- ncol(sample.obj)
+
+    cat(sample_name, ": ", pre_cells, " -> ", post_cells, " cells (",
+        round(100*post_cells/pre_cells, 1), "% retained)\n", sep="")
+
+    qc_stats <- rbind(qc_stats, data.frame(
+        sample = sample_name,
+        group = sample.obj$Group[1],
+        cells_before = pre_cells,
+        cells_after = post_cells,
+        percent_retained = 100*post_cells/pre_cells
+    ))
+
     seurat_list[[sample_name]] <- sample.obj
 }
+
+write.csv(qc_stats, "plots/qc_summary.csv", row.names = FALSE)
+cat("\nQC summary saved to plots/qc_summary.csv\n")
+vln_plots <- create_violin_plots(seurat_list)
+
+# Combine, save, and view in one go
+combined_plot <- wrap_plots(vln_plots, ncol = 3)
+ggsave("plots/violin_plots_after_qc.png", combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
 ```
 
-## Filtering the merged seurat object
+# Merging together all the Seurat Objects into a single Seurat Object
 
 ```{r}
-merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > min_genes &
-                                                nFeature_RNA < max_genes &
-                                                nCount_RNA > min_UMI &
-                                                nCount_RNA < max_UMI &
-                                                percent_mt < max_percent_mt &
-                                                percent_mt > min_percent_mt)
+cat("\n=== Merging samples ===\n")
+
+if (length(seurat_list) > 1){
+    merged_seurat <- merge(seurat_list[[1]],
+                          y = seurat_list[2:length(seurat_list)],
+                          add.cell.ids = names(seurat_list),
+                          project = "Control_vs_OSA")
+} else {
+    merged_seurat <- seurat_list[[1]]
+}
+
+# Join layers if using Seurat v5
+if (inherits(merged_seurat[["RNA"]], "Assay5")) {
+  merged_seurat[["RNA"]] <- JoinLayers(merged_seurat[["RNA"]])
+}
+
+merged_seurat@meta.data <- separate(merged_seurat@meta.data, col='orig.ident', into = c('Sample_ID', 'Group'), sep = '_')
+
+cat("Merged dataset:", ncol(merged_seurat), "cells,", nrow(merged_seurat), "genes\n")
 ```
 
-## Performing QC again
+# Standard Normalization and scaling
 
 ```{r}
-vln_plots_after_qc <- create_violin_plots(seurat_list)
-combined_plot <- wrap_plots(vln_plots_after_qc)
-ggsave('plots/violin_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
-
-scatter_plots_after_qc <- create_feature_scatter_plots(seurat_list)
-combined_plot <- wrap_plots(scatter_plots_after_qc)
-ggsave('plots/scatter_plots_after_qc.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+cat("\n=== Normalizing and scaling data ===\n")
+merged_seurat <- NormalizeData(merged_seurat)
+merged_seurat <- FindVariableFeatures(merged_seurat, selection.method = "vst", nfeatures = 2000)
+merged_seurat <- ScaleData(merged_seurat)
 ```
 
-# Data Normalization
+# PCA
 
 ```{r}
-merged_seurat <- NormalizeData(merged_seurat, normalization.method = 'LogNormalize', scale.factor = 10000)
-```
-
-# Finding the variable features in each sample
-
-```{r}
-merged_seurat <- FindVariableFeatures(merged_seurat, 
-                                     selection.method = "vst", 
-                                     nfeatures = 2000)
-                                     
-seurat_list <- lapply(X = seurat_list, FUN=function(X){
-    X <-  NormalizeData(X, normalization.method = 'LogNormalize', scale.factor = 10000)
-    X <- FindVariableFeatures(X, selection.method = 'vst', nfeatures = 2000)
-})
-names(seurat_list) <- seurat_list.names
-```
-
-
-```{r}
-top10 <- head(VariableFeatures(merged_seurat), 10)
-plot1 <- VariableFeaturePlot(merged_seurat)
-plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
-plot2
-```
-
-# Scaling our data
-
-```{r}
-all_genes <- rownames(merged_seurat)
-merged_seurat <- ScaleData(merged_seurat, features = all_genes)
-
-seurat_list <- lapply(X = seurat_list, FUN = function(X){
-    sample.genes <- rownames(X)
-    X <- ScaleData(X, features = sample.genes)
-})
-names(seurat_list) <- seurat_list.names
-```
-
-# Principal Component Analysis
-
-```{r}
+cat("\n=== Running PCA ===\n")
 if (!file.exists('data/merged_seurat_after_pca.rds')){
-merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(object = merged_seurat))
-saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
+    merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(object = merged_seurat), verbose = FALSE)
+    saveRDS(merged_seurat, file = 'data/merged_seurat_after_pca.rds')
 } else{
     merged_seurat <- readRDS('data/merged_seurat_after_pca.rds')
 }
-
-seurat_list <- lapply(X = names(seurat_list), FUN = function(name){
-    X <- seurat_list[[name]]
-    cat(paste0("\nSeurat Object Name:\t",name,'\n'))
-    X <- RunPCA(X, features = VariableFeatures(X))
-})
-names(seurat_list) <- seurat_list.names
 ```
 
-## PCA Plots
-```{r}
-plot_PCA <- function(seurat_list){
-    pca_plots <- list()
+# Elbow Plot to choose the number of Principle Components
 
-    for (sample_name in sample_names) {
-        sample.obj <- seurat_list[[sample_name]]
-        
-        pca.plot <-  DimPlot(sample.obj, reduction = 'pca', pt.size = 0.6) +
-            ggtitle(paste0('PCA - ', sample_name))
-        
-        pca_plots[[sample_name]] <- pca.plot
-    }
-    return(pca_plots)
+```{r}
+elbow <- ElbowPlot(merged_seurat, ndims = 50)
+jpeg('plots/elbow_plot_before_integration.png')
+print(elbow)
+dev.off()
+```
+
+
+
+# Clustering and UMAP before Integration
+
+```{r}
+cat("\n=== Clustering before integration ===\n")
+merged_seurat <- FindNeighbors(merged_seurat, dims = 1:30)
+merged_seurat <- FindClusters(merged_seurat, resolution = 0.5)
+if (!file.exists('data/merged_seurat_after_umap.rds')) {
+    merged_seurat <- RunUMAP(merged_seurat, dims = 1:30)
+    saveRDS(merged_seurat, file ='data/merged_seurat_after_umap.rds')
+} else {
+    merged_seurat <- readRDS('data/merged_seurat_after_umap.rds')
 }
-pca.plots <- plot_PCA(seurat_list)
-combined_plot <- wrap_plots(pca.plots)
-ggsave('plots/PCA_plots.png', combined_plot, width = 70, height = 50, dpi = 300, limitsize = FALSE)
+
+cat("Creating UMAP plots before integration...\n")
+umap_coords <- as.data.frame(merged_seurat@reductions$umap@cell.embeddings)
+colnames(umap_coords) <- c("UMAP_1", "UMAP_2")
+umap_coords$Group <- merged_seurat@meta.data$Group
+umap_coords$Sample <- merged_seurat@meta.data$Sample_ID
+umap_coords$Cluster <- merged_seurat@meta.data$seurat_clusters
+
+# UMAP by Group
+p1 <- ggplot(umap_coords, aes(x = UMAP_1, y = UMAP_2, color = Group)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  theme_classic() +
+  theme(legend.position = "right") +
+  labs(title = "UMAP Before Integration (by Group)") +
+  scale_color_manual(values = c("Control" = "#4DBBD5", "OSA" = "#E64B35"))
+
+png('plots/UMAP_before_integration_by_group.png', width = 2400, height = 2000, res = 300)
+print(p1)
+dev.off()
+
+# UMAP by Cluster
+p2 <- ggplot(umap_coords, aes(x = UMAP_1, y = UMAP_2, color = Cluster)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  theme_classic() +
+  theme(legend.position = "right") +
+  labs(title = "UMAP Before Integration (by Cluster)")
+
+png('plots/UMAP_before_integration_by_cluster.png', width = 2400, height = 2000, res = 300)
+print(p2)
+dev.off()
+
+# UMAP split by Group
+p3 <- ggplot(umap_coords, aes(x = UMAP_1, y = UMAP_2, color = Cluster)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  facet_wrap(~Group) +
+  theme_classic() +
+  theme(legend.position = "right") +
+  labs(title = "UMAP Before Integration (split by Group)")
+
+png('plots/UMAP_before_integration_split.png', width = 3000, height = 1500, res = 300)
+print(p3)
+dev.off()
 ```
 
-## Integration
+
+# Integration with Seurat v5 workflow
 
 ```{r}
-features <- SelectIntegrationFeatures(seurat_list)
-anchors <- FindIntegrationAnchors(seurat_list, anchor.features = features)
+if (!file.exists('data/seurat_integrated.rds')){
+    # For Seurat v5: split by sample for integration
+    merged_seurat[["RNA"]] <- split(merged_seurat[["RNA"]], f = merged_seurat$Sample_ID)
+
+    # Normalize and find variable features for each sample
+    merged_seurat <- NormalizeData(merged_seurat)
+    merged_seurat <- FindVariableFeatures(merged_seurat)
+    merged_seurat <- ScaleData(merged_seurat)
+    merged_seurat <- RunPCA(merged_seurat)
+
+    # Integrate
+    seurat_integrated <- IntegrateLayers(
+        object = merged_seurat,
+        method = CCAIntegration,
+        orig.reduction = "pca",
+        new.reduction = "integrated.cca",
+        verbose = TRUE
+    )
+
+    # Rejoin layers after integration
+    seurat_integrated[["RNA"]] <- JoinLayers(seurat_integrated[["RNA"]])
+
+    saveRDS(seurat_integrated, file='data/seurat_integrated.rds')
+} else {
+    seurat_integrated <- readRDS('data/seurat_integrated.rds')
+}
+```
+
+# Post-Integration Clustering, UMAP and TSNE
+
+```{r}
+cat("\n--- Step 1: Clustering on integrated data ---\n")
+
+seurat_integrated <- FindNeighbors(seurat_integrated,
+                                    reduction = 'integrated.cca',
+                                    dims = 1:30)
+
+seurat_integrated <- FindClusters(seurat_integrated,
+                                    resolution = 0.5,
+                                    algorithm = 1)
+
+seurat_integrated <- RunUMAP(seurat_integrated,
+                             reduction = 'integrated.cca',
+                             dims = 1:30)
+
+seurat_integrated <- RunTSNE(seurat_integrated,
+                             reduction = 'integrated.cca',
+                             dims = 1:30,
+                             perplexity = 30,
+                             check_duplicates = FALSE)
+```
+
+# T-SNE plots
+
+```{r}
+seurat_integrated$Condition <- ifelse(grepl("^Control", seurat_integrated$Group), "Control", "OSA")
+
+p1_tsne_group <- DimPlot(seurat_integrated, reduction = 'tsne', group.by = 'Condition')+
+  ggtitle("t-SNE by Condition") +
+  theme_classic()
+png('plots/tsne_by_condition.png', width = 3000, height = 1500, res = 300)
+print(p1_tsne_group)
+dev.off()
+
+p2_tsne_cluster <- DimPlot(seurat_integrated,
+                            reduction = 'tsne',
+                            group.by = 'seurat_clusters',
+                            label = TRUE,
+                            repel=TRUE) +
+                    ggtitle('t-SNE by Cluster') +
+                    theme_classic() +
+                    theme(legend.position = 'right')
+png('plots/tsne_by_cluster.png', width = 3000, height = 1500, res = 300)
+print(p2_tsne_cluster)
+dev.off()
+
+p3_tsne <- DimPlot(seurat_integrated,
+                    reduction = 'tsne',
+                    split.by = 'Condition',
+                    group.by = 'seurat_clusters',
+                    label = TRUE) +
+            ggtitle('t-SNE split by Condition') + 
+            theme_classic()
+png('plots/tsne_split_by_condition.png', width = 3000, height = 1500, res = 300)        
+print(p3_tsne)
+dev.off()
+```
+
+# UMAP Plots
+
+```{r}
+p1_umap_group <- DimPlot(seurat_integrated,
+                         reduction = 'umap',
+                        group.by = 'Condition') +
+                ggtitle('UMAP by Condition') +
+                theme_classic()
+png('plots/UMAP_after_integration_condition.png', width = 3000, height = 1500, res = 300)                                
+print(p1_umap_group)
+dev.off()
+
+p2_umap_cluster <- DimPlot(seurat_integrated,
+                            reduction = 'umap',
+                            group.by = 'seurat_clusters',
+                            label = TRUE,
+                            repel=TRUE) +
+                    ggtitle('UMAP by Cluster') +
+                    theme_classic() +
+                    theme(legend.position = 'right')
+png('plots/UMAP_after_integration_cluster.png', width = 3000, height = 1500, res = 300)
+print(p2_umap_cluster)
+dev.off()
+
+p3_umap <- DimPlot(seurat_integrated,
+                    reduction = 'umap',
+                    split.by = 'Condition',
+                    group.by = 'seurat_clusters',
+                    label = TRUE) +
+            ggtitle('UMAP split by Condition') + 
+            theme_classic()
+png('plots/UMAP_after_integration_split_by_condition.png', width = 3000, height = 1500, res = 300)
+print(p3_umap)
+dev.off()
+```
+
+# Cell Annotation using PBMC markers
+
+## Defining PBMC cell type markers
+```{r}
+cat('\n--- Step 2: Annotating cell types using PBMC markers ---\n')
+
+pbmc_markers <- list(
+    # T-cell markers
+    'T_cells' = c("CD3D", 'CD3E', 'CD3G'),
+  "T_Helper" = c("CD4", "IL7R"),
+  "T_Cytotoxic" = c("CD8A", "CD8B"),
+  "T_Regulatory" = c("FOXP3", "IL2RA", "CTLA4"),
+  "T_Naive" = c("CCR7", "SELL", "TCF7"),
+  "T_Memory" = c("IL7R", "CD44"),
+  
+  # B-cell markers
+  "B_Cells" = c("CD79A", "MS4A1", "CD19"),
+  "B_Naive" = c("IGHD", "TCL1A"),
+  "B_Memory" = c("CD27", "TNFRSF13B"),
+  "Plasmablast" = c("IGHG1", "MZB1", "SDC1", "XBP1"),
+  
+  # Myeloid markers
+  "Monocytes_Classical" = c("CD14", "S100A8", "S100A9"),
+  "Monocytes_NonClassical" = c("FCGR3A", "MS4A7", "CD16"),
+  "cDC" = c("FCER1A", "CD1C"),
+  "pDC" = c("LILRA4", "IL3RA", "IRF7"),
+  
+  # NK cells
+  "NK_Cells" = c("GNLY", "NKG7", "NCAM1", "KLRD1"),
+  
+  # Other
+  "Platelets" = c("PPBP", "PF4"),
+  "Erythroblast" = c("HBA1", "HBB")
+)
+```
+
+## Scoring the cells for each marker set
+
+```{r}
+for (cell_type in names(pbmc_markers)) {
+    genes <- pbmc_markers[[cell_type]]
+    genes_present <- genes[genes %in% rownames(seurat_integrated)]
+
+    if (length(genes_present) > 0)  {
+        seurat_integrated <- AddModuleScore(
+            seurat_integrated,
+            features = list(genes_present),
+            name = paste0(cell_type, "_score")
+        )
+    }
+}
+```
+
+## Feature Plots for key markers
+
+```{r}
+key_markers <- c("CD3D", "CD4", "CD8A", "CD79A", "MS4A1", "CD14", "FCGR3A", 
+                 "NKG7", "GNLY", "FOXP3", "MZB1")
+key_markers_present <- key_markers[key_markers %in% rownames(seurat_integrated)]
+
+if (length(key_markers_present) > 0) {
+    png('plots/feature_plot_key_markers.png',
+    width = 4000, height = ceiling(length(key_markers_present)/3) * 800, res = 300)
+    print(FeaturePlot(seurat_integrated, features = key_markers_present, ncol = 3))
+    dev.off()
+}
+```
+
+## Find Cluster markers for annotations
+
+```{r}
+if (!file.exists('data/cluster_markers.rds')) {
+    all_markers <- FindAllMarkers(seurat_integrated,
+                                    only.pos = TRUE,
+                                    min.pct = 0.25,
+                                    logfc.threshold = 0.25)
+    saveRDS(all_markers, 'data/cluster_markers.rds')
+    write.csv(all_markers, 'plots/cluster_markers.csv', row.names = FALSE)
+} else {
+    all_markers <- readRDS('data/cluster_markers.rds')
+}
 ```
