@@ -1,0 +1,6 @@
+"p_val","avg_log2FC","pct.1","pct.2","p_val_adj","gene","significant","label","pathway"
+0,0.907839165554094,0.625,0.343,0,"RPS4Y1","significant","RPS4Y1",NA
+0,-1.11472004369037,0.29,0.555,0,"XIST","significant","XIST",NA
+0,0.866522132245943,0.373,0.208,0,"DDX3Y","significant","DDX3Y",NA
+0,-1.12567742427639,0.191,0.327,0,"FAM118A","significant","FAM118A",NA
+1.33291087164613e-182,-0.605176628747505,0.215,0.287,3.26829745727631e-178,"HIST1H1E","significant","HIST1H1E",NA

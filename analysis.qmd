@@ -325,23 +325,29 @@ if (!file.exists('data/seurat_integrated.rds')){
 ```{r}
 cat("\n--- Step 1: Clustering on integrated data ---\n")
 
-seurat_integrated <- FindNeighbors(seurat_integrated,
-                                    reduction = 'integrated.cca',
-                                    dims = 1:30)
+if (!file.exists('data/seurat_integrated_after_clustering.rds')) {
+    seurat_integrated <- FindNeighbors(seurat_integrated,
+                                        reduction = 'integrated.cca',
+                                        dims = 1:30)
 
-seurat_integrated <- FindClusters(seurat_integrated,
-                                    resolution = 0.5,
-                                    algorithm = 1)
+    seurat_integrated <- FindClusters(seurat_integrated,
+                                        resolution = 0.2,
+                                        algorithm = 1)
 
-seurat_integrated <- RunUMAP(seurat_integrated,
-                             reduction = 'integrated.cca',
-                             dims = 1:30)
+    seurat_integrated <- RunUMAP(seurat_integrated,
+                                reduction = 'integrated.cca',
+                                dims = 1:30)
 
-seurat_integrated <- RunTSNE(seurat_integrated,
-                             reduction = 'integrated.cca',
-                             dims = 1:30,
-                             perplexity = 30,
-                             check_duplicates = FALSE)
+    seurat_integrated <- RunTSNE(seurat_integrated,
+                                reduction = 'integrated.cca',
+                                dims = 1:30,
+                                perplexity = 30,
+                                check_duplicates = FALSE)
+
+    saveRDS(seurat_integrated, file="data/seurat_integrated_after_clustering.rds")
+} else {
+    seurat_integrated <- readRDS("data/seurat_integrated_after_clustering.rds")
+}
 ```
 
 # T-SNE plots
@@ -497,4 +503,471 @@ if (!file.exists('data/cluster_markers.rds')) {
 } else {
     all_markers <- readRDS('data/cluster_markers.rds')
 }
+```
+
+### Saving the Top 10 markers
+
+```{r}
+top10_markers <- all_markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC)
+
+write.csv(top10_markers, 'plots/top10_cluster_markers.csv', row.names = FALSE)
+```
+
+## Dot Plot of canonical markers
+
+```{r}
+png('plots/dotplot_canonical_markers.png', width = 3500, height = 2000, res = 300)
+print(DotPlot(seurat_integrated, features = key_markers_present) +
+    RotatedAxis() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+dev.off()
+```
+
+# Cell Composition Analysis
+
+```{r}
+cat('\n--- Step 3: Cell Composition Analysis ---\n')
+
+cell_composition <- seurat_integrated@meta.data %>%
+    group_by(Sample_ID, Condition, seurat_clusters) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    group_by(Sample_ID, Condition) %>%
+    mutate(
+        total = sum(count),
+        proportion = count/total * 100
+    )
+write.csv(cell_composition, 'plots/cell_composition_per_sample.csv', row.names = FALSE)
+```
+
+## Composition Stats
+
+```{r}
+composition_stats <- data.frame()
+
+for (cluster in unique(cell_composition$seurat_clusters)) {
+    cluster_data <- cell_composition %>%
+        filter(seurat_clusters == cluster) %>%
+        select(Sample_ID, Condition, proportion)
+
+    osa_prop <- cluster_data %>% filter(Condition == 'OSA') %>% pull(proportion)
+    control_prop <- cluster_data %>% filter(Condition == 'Control') %>% pull(proportion)
+
+    if (length(osa_prop) > 0 && length(control_prop) > 0) {
+        test_result <- wilcox.test(osa_prop, control_prop)
+        
+        composition_stats <- rbind(composition_stats, data.frame(
+            cluster = cluster,
+            mean_OSA = mean(osa_prop),
+            mean_Control = mean(control_prop),
+            sd_OSA = sd(osa_prop),
+            sd_Control = sd(control_prop),
+            p_value = test_result$p.value,
+            significant = test_result$p.value < 0.05
+        ))
+    }
+}
+
+composition_stats <- composition_stats %>% arrange(p_value)
+write.csv(composition_stats, 'plots/composition_statistics.csv', row.names = FALSE)
+```
+
+### Visualizing the composition stats
+
+```{r}
+cat("\nClusters with significant composition differences:\n")
+print(composition_stats %>% filter(significant))
+
+# Visualization - box plots
+composition_plot_data <- cell_composition %>%
+    group_by(seurat_clusters, Condition) %>%
+    summarise(
+        mean_prop = mean(proportion),
+        sd_prop = sd(proportion),
+        .groups = 'drop'
+    )
+
+p_comp <- ggplot(composition_plot_data, aes(x = seurat_clusters, y = mean_prop, fill = Condition)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_errorbar(aes(ymin = mean_prop - sd_prop, ymax = mean_prop + sd_prop),
+                  position = position_dodge(0.9), width = 0.2) +
+    scale_fill_manual(values = c("Control" = "#4DBBD5", "OSA" = "#E64B35")) +
+    theme_classic() +
+    labs(title = "Cell Composition: OSA vs Control",
+         x = "Cluster", y = "Proportion (%)") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+png('plots/cell_composition_barplot.png', width = 3000, height = 2000, res = 300)
+print(p_comp)
+dev.off()
+```
+
+# Overall Differential Expression (All Cells)
+
+```{r}
+cat('\n--- Step 4: Overall Differential Expression Analysis ---\n')
+
+Idents(seurat_integrated) <- 'Condition'
+if (!file.exists('data/DE_OSA_vs_control_overall.rds')) {
+    cat('Running Overall DE analysis')
+    DE_overall <- FindMarkers(
+        seurat_integrated, 
+        ident.1 = 'OSA', ident.2 = 'Control',
+        min.pct = 0.1, logfc.threshold = 0.25,
+        test.use = 'wilcox'
+    )
+
+    DE_overall$gene <- rownames(DE_overall)
+    DE_overall <- DE_overall %>% arrange(p_val_adj)
+
+    saveRDS(DE_overall, 'data/DE_OSA_vs_control_overall.rds')
+    write.csv(DE_overall, 'plots/DE_OSA_vs_control_overall.csv', row.names=FALSE)
+} else {
+    DE_overall <- readRDS('data/DE_OSA_vs_control_overall.rds')
+}
+
+cat("Total DEGs (padj < 0.05):", sum(DE_overall$p_val_adj < 0.05), "\n")
+cat("  Upregulated in OSA:", sum(DE_overall$p_val_adj < 0.05 & DE_overall$avg_log2FC > 0), "\n")
+cat("  Downregulated in OSA:", sum(DE_overall$p_val_adj < 0.05 & DE_overall$avg_log2FC < 0), "\n")
+```
+
+# Cell-type specific DE Analysis
+
+
+```{r}
+cat("\n=== Step 5: Cell-type-specific DE analysis ===\n")
+
+seurat_integrated$celltype.group <- paste(seurat_integrated$seurat_clusters, 
+                                          seurat_integrated$Condition, sep = "_")
+Idents(seurat_integrated) <- "celltype.group"
+
+cluster_DE_results <- list()
+cluster_gene_counts <- data.frame()
+
+for (cluster in sort(unique(seurat_integrated$seurat_clusters))) {
+    cat("Analyzing cluster ", cluster, '\n')
+
+    ident1 <- paste0(cluster, '_OSA')
+    ident2 <- paste0(cluster, '_Control')
+
+    if (ident1 %in% levels(Idents(seurat_integrated)) &&
+        ident2 %in% levels(Idents(seurat_integrated))) {
+            tryCatch({
+                DE_cluster <- FindMarkers(
+                    seurat_integrated,
+                    ident.1 = ident1, ident.2 = ident2,
+                    min.pct = 0.1, logfc.threshold = 0.25,
+                    test.use = 'wilcox', verbose = FALSE
+                )
+
+                DE_cluster$gene <- rownames(DE_cluster)
+                DE_cluster$cluster <- cluster
+                cluster_DE_results[[as.character(cluster)]] <- DE_cluster
+
+                # Count Significant genes
+                n_sig = sum(DE_cluster$p_val_adj < 0.05)
+                n_up <- sum(DE_cluster$p_val_adj < 0.05 & DE_cluster$avg_log2FC > 0)
+                n_down <- sum(DE_cluster$p_val_adj < 0.05 & DE_cluster$avg_log2FC < 0)
+
+                cluster_gene_counts <- rbind(cluster_gene_counts, data.frame(
+                cluster = cluster,
+                total_DEG = n_sig,
+                upregulated = n_up,
+                downregulated = n_down
+                ))
+            
+                write.csv(DE_cluster, 
+                        paste0('plots/DE_cluster_', cluster, '_OSA_vs_Control.csv'), 
+                        row.names = FALSE)
+            }, error = function(e) {
+            cat("  Error in cluster", cluster, ":", e$message, "\n")
+        })
+    }
+}
+
+
+all_cluster_DE <- bind_rows(cluster_DE_results)
+saveRDS(all_cluster_DE, 'data/all_cluster_DE_results.rds')
+write.csv(all_cluster_DE, 'plots/all_cluster_DE_results.csv', row.names = FALSE)
+write.csv(cluster_gene_counts, 'plots/cluster_DEG_counts.csv', row.names = FALSE)
+
+# Replicate Figure 1c - Number of DE genes per cluster
+p_deg_counts <- ggplot(cluster_gene_counts, aes(x = cluster, y = total_DEG)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    theme_classic() +
+    labs(title = "Differentially Expressed Genes per Cluster",
+         x = "Cluster", y = "Number of DEGs") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+png('plots/DEG_counts_per_cluster.png', width = 2400, height = 2000, res = 300)
+print(p_deg_counts)
+dev.off()
+```
+
+# Identification of OSA-associated Pathway Genes
+
+```{r}
+cat("\n--- Step 6: Identifying OSA-associated Pathway Genes ---\n")
+```
+
+## Defining a list of OSA related pathway genes
+
+```{r}
+osa_pathway_genes <- list(
+  "KEGG_HIF1_GF_RTK_HIF1a_translation" = c(
+    "EGF", "EGFR", "ERBB2", "IGF1", "IGF1R", "INS", "INSR"
+  ),
+  "KEGG_HIF1_MTOR_HIF1a_translation" = c(
+    "EIF4E", "EIF4E1B", "EIF4E2", "EIF4EBP1", "MTOR",
+    "RPS6", "RPS6KB1", "RPS6KB2"
+  ),
+  "KEGG_HIF1_IH_HIF1a_degradation" = c(
+    "CYBB", "EGLN1", "EGLN2", "EGLN3", "PLCG1", "PLCG2", "PRKCA"
+  ),
+  "KEGG_HIF1_HIF1a_degradation_ubiquitin" = c(
+    "CUL2", "ELOB", "ELOC", "RBX1", "VHL"
+  ),
+  "KEGG_HIF1_IH_HIF1b_activation" = c(
+    "ARNT", "CAMK2A", "CAMK2B", "CAMK2D", "CAMK2G",
+    "CREBBP", "CYBB", "EP300", "PLCG1", "PLCG2"
+  ),
+  "KEGG_HIF1_RBC" = c(
+    "EPO", "TF", "TFRC"
+  ),
+  "KEGG_HIF1_angiogenesis" = c(
+    "ANGPT1", "ANGPT2", "ANGPT4", "EGF", "FLT1",
+    "SERPINE1", "TEK", "TIMP1", "VEGFA"
+  ),
+  "KEGG_HIF1_vascular_tone" = c(
+    "EDN1", "HMOX1", "NOS2", "NOS3", "NPPA"
+  ),
+  "KEGG_HIF1_glucose_inhibit_citrate" = c(
+    "PDHA1", "PDHA2", "PDHB", "PDK1", "SLC2A1"
+  ),
+  "KEGG_HIF1_glucose_promote_anaerobic" = c(
+    "ALDOA", "ENO1", "ENO2", "ENO3", "ENO4",
+    "GAPDH", "HK2", "HK3", "HKDC1", "LDHA",
+    "PFKFB3", "PFKL", "PGK1"
+  ),
+  "KEGG_HIF1_glucose_regulate_proliferation" = c(
+    "BCL2", "CDKN1A", "CDKN1B"
+  ),
+  "KEGG_VEGF_proliferation" = c(
+    "HRAS", "KRAS", "MAP2K1", "MAP2K2", "MAPK1", "MAPK3",
+    "NRAS", "PLCG1", "PLCG2", "PRKCA", "PRKCB", "PRKCG",
+    "RAF1", "SPHK1", "SPHK2"
+  ),
+  "KEGG_VEGF_PGI2_production" = c(
+    "NFATC2", "PPP3CA", "PPP3CB", "PPP3CC",
+    "PPP3R1", "PPP3R2", "PTGS2"
+  ),
+  "KEGG_VEGF_migration" = c(
+    "CDC42", "MAPK11", "MAPK12", "MAPK13", "MAPK14",
+    "MAPKAPK2", "MAPKAPK3", "PTK2", "PXN"
+  ),
+  "KEGG_VEGF_endothelial_permeability" = c(
+    "AKT1", "AKT2", "AKT3", "NOS3",
+    "PIK3CA", "PIK3CB", "PIK3CD",
+    "PIK3R1", "PIK3R2", "PIK3R3",
+    "RAC1", "RAC2", "RAC3", "SRC"
+  ),
+  "KEGG_VEGF_endothelial_survival" = c(
+    "AKT1", "AKT2", "AKT3", "BAD", "CASP9",
+    "PIK3CA", "PIK3CB", "PIK3CD",
+    "PIK3R1", "PIK3R2", "PIK3R3",
+    "SRC"
+  ),
+  "KEGG_HIF1_VEGF_shared_MAPK" = c(
+    "MAP2K1", "MAP2K2", "MAPK1", "MAPK3", "MKNK1", "MKNK2"
+  ),
+  "KEGG_HIF1_VEGF_shared_PI3K_AKT" = c(
+    "AKT1", "AKT2", "AKT3",
+    "PIK3CA", "PIK3CB", "PIK3CD",
+    "PIK3R1", "PIK3R2", "PIK3R3"
+  ),
+  "KEGG_HIF1_NFkB_related" = c(
+    "IFNG", "IFNGR1", "IFNGR2", "IL6", "IL6R",
+    "STAT3", "TLR4"
+  ),
+  "KEGG_NFkB_atypical" = c(
+    "BCL2A1", "BCL2L1", "CSNK2A1", "CSNK2A2", "CSNK2A3",
+    "CSNK2B", "EGF", "EGFR", "ERBB2",
+    "NFKB1", "NFKBIA", "PLAU", "RELA"
+  ),
+  "KEGG_NFkB_atypical_upstream" = c(
+    "BAG4", "IL1B", "IL1R1", "IRAK1", "IRAK4",
+    "MYD88", "RIPK1", "TNF", "TNFRSF11A",
+    "TNFRSF1A", "TNFSF11", "TRADD",
+    "TRAF2", "TRAF5", "TRAF6"
+  ),
+  "KEGG_TNF_JNK" = c(
+    "FOS", "JUN", "MAP2K4", "MAP2K7",
+    "MAP3K7", "MAPK10", "MAPK8", "MAPK9",
+    "TAB1", "TAB2"
+  ),
+  "KEGG_TNF_p38" = c(
+    "ATF2", "ATF4", "ATF6B",
+    "CREB1", "CREB3", "CREB3L1", "CREB3L2",
+    "CREB3L3", "CREB3L4", "CREB5",
+    "MAP2K3", "MAP2K6", "MAP3K7",
+    "MAPK14", "RPS6KA4", "RPS6KA5",
+    "TAB1", "TAB2"
+  ),
+  "KEGG_NFkB_TNF" = c(
+    "BIRC2", "BIRC3", "CHUK",
+    "IKBKB", "IKBKG",
+    "MAP3K14", "MAP3K7",
+    "NFKB1", "NFKBIA", "RELA",
+    "RIPK1", "TAB1", "TAB2", "TAB3",
+    "TNF", "TNFRSF1A", "TRADD",
+    "TRAF2", "TRAF5"
+  ),
+  "KEGG_NFkB_survival" = c(
+    "BCL2", "BCL2A1", "BCL2L1",
+    "CFLAR", "GADD45B", "TRAF1", "XIAP"
+  ),
+  "KEGG_NFkB_inflammation" = c(
+    "CCL4", "CCL4L1", "CCL4L2",
+    "CXCL1", "CXCL2", "CXCL3", "CXCL8",
+    "PTGS2", "TNFAIP3", "VCAM1"
+  ),
+  "KEGG_TNF_apoptosis" = c(
+    "CASP10", "CASP3", "CASP7", "CASP8",
+    "CFLAR", "FADD", "ITCH"
+  ),
+  "KEGG_TNF_necroptosis" = c(
+    "DNM1L", "MLKL", "PGAM5", "RIPK1", "RIPK3"
+  ),
+  "KEGG_TNF_immune_signaling" = c(
+    "BCL3", "CCL2", "CCL20", "CCL5",
+    "CSF1", "CSF2",
+    "CX3CL1", "CXCL1", "CXCL10",
+    "CXCL2", "CXCL3", "CXCL5",
+    "FAS", "IL15", "IL18R1", "IL1B",
+    "IL6", "JAG1", "LIF", "LTA",
+    "RAF1", "SOCS3", "TNFAIP3"
+  ),
+  "KEGG_TNF_intracellular_signaling" = c(
+    "EDN1", "FOS", "ICAM1", "JUN", "JUNB",
+    "MMP14", "MMP3", "MMP9",
+    "NOD2", "PTGS2", "SELE", "VCAM1", "VEGFC"
+  ),
+   "Hypoxia_HIF1A" = c("HIF1A", "VEGFA", "LDHA", "ENO1", "SLC2A1", "PDK1",
+                      "BNIP3", "NDRG1", "EGLN1", "EGLN3"),
+  "Oxidative_Stress" = c("SOD1", "SOD2", "CAT", "GPX1", "HMOX1", "NQO1",
+                         "TXNRD1", "PRDX1", "GCLC"),
+  "NFkB_Signaling" = c("NFKB1", "NFKB2", "RELA", "RELB", "NFKBIA", "IKBKB",
+                       "TNF", "IL1B", "IL6"),
+  "Interferon_Response" = c("IFNG", "IFNAR1", "STAT1", "STAT2", "IRF7",
+                            "ISG15", "MX1", "OAS1", "IFIT1"),
+  "Nitric_Oxide_ROS" = c("NOS2", "NOS3", "NOX2", "CYBB", "NCF1", "NCF2")
+)
+
+```
+
+```{r}
+pathway_de_summary <- data.frame()
+
+for (pathway in names(osa_pathway_genes)) {
+    genes <- osa_pathway_genes[[pathway]]
+
+    # Check in overall DE
+    pathway_genes_de <- DE_overall %>%
+        filter(gene %in% genes, p_val_adj < 0.05)
+
+    if (nrow(pathway_genes_de) > 0) {
+        pathway_genes_de$pathway <- pathway
+        pathway_de_summary <- rbind(pathway_de_summary, pathway_genes_de)
+    }
+}
+
+if (nrow(pathway_de_summary) > 0) {
+    write.csv(pathway_de_summary, 'plots/OSA_pathway_genes_DE.csv', row.names = FALSE)
+    
+    cat("\nOSA pathophysiology genes found:\n")
+    print(pathway_de_summary %>% 
+          group_by(pathway) %>% 
+          summarise(n_genes = n(), .groups = 'drop'))
+}
+```
+
+# Building Molecular Signature
+
+```{r}
+cat("\n--- Step 7: Building Molecular Signature ---\n")
+
+biomarker_candidates <- DE_overall %>%
+    filter(
+        p_val_adj < 0.01,
+        abs(avg_log2FC) > 0.5,
+        (pct.1 > 0.25 | pct.2 > 0.25)
+    ) %>%
+        arrange(p_val_adj) %>%
+        head(50)
+
+biomarker_candidates$pathway <- NA
+for (pathway in names(osa_pathway_genes)) {
+    genes <- osa_pathway_genes[[pathway]]
+    biomarker_candidates$pathway[biomarker_candidates$gene %in% genes] <- pathway
+}
+
+write.csv(biomarker_candidates, 'plots/biomarker_signature_candidates.csv', row.names = FALSE)
+```
+
+# Comprehensive Visualizations
+
+```{r}
+DE_overall$significant <- ifelse(
+    DE_overall$p_val_adj < 0.05 & abs(DE_overall$avg_log2FC) > 0.5,
+    'significant', 'not significant'
+)
+
+DE_overall$label <- ''
+top_genes <- head(biomarker_candidates$gene)
+DE_overall$label[DE_overall$gene %in% top_genes] <- DE_overall$gene[DE_overall$gene %in% top_genes]
+```
+
+## Volcano Plot
+
+```{r}
+p_volcano <- ggplot(DE_overall, aes(x = avg_log2FC, y = -log10(p_val_adj), 
+                                    color = significant, label = label)) +
+    geom_point(alpha = 0.4, size = 1) +
+    scale_color_manual(values = c("Significant" = "red", "Not Significant" = "grey")) +
+    geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "blue") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+    ggrepel::geom_text_repel(size = 3, max.overlaps = 15) +
+    theme_classic() +
+    labs(title = "Volcano Plot: OSA vs Control",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted P-value")
+
+png('plots/volcano_plot_labeled.png', width = 3200, height = 2400, res = 300)
+print(p_volcano)
+dev.off()
+```
+
+## Heatmap
+
+```{r}
+# 8.2 Heatmap of top biomarkers by Group
+top_biomarkers <- biomarker_candidates$gene
+top_biomarkers <- top_biomarkers[top_biomarkers %in% rownames(seurat_integrated)]
+
+if (length(top_biomarkers) > 0) {
+    Idents(seurat_integrated) <- "Condition"
+    
+    png('plots/heatmap_top_biomarkers_by_group.png', width = 2400, height = 3000, res = 300)
+    print(DoHeatmap(seurat_integrated, features = top_biomarkers, 
+                    group.by = "Condition", size = 4) +
+          scale_fill_gradientn(colors = c("blue", "white", "red")))
+    dev.off()
+}
+```
+
+
+```{r}
+saveRDS(seurat_integrated, 'data/final_seurat_object.rds')
 ```

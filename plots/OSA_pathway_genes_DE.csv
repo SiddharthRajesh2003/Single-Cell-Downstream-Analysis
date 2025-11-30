@@ -1,0 +1,6 @@
+"p_val","avg_log2FC","pct.1","pct.2","p_val_adj","gene","significant","label","pathway"
+5.12843244224001e-177,-0.306680903720773,0.454,0.534,1.25749163483725e-172,"PLCG2","not significant","","KEGG_HIF1_IH_HIF1a_degradation"
+5.12843244224001e-177,-0.306680903720773,0.454,0.534,1.25749163483725e-172,"PLCG2","not significant","","KEGG_HIF1_IH_HIF1b_activation"
+5.12843244224001e-177,-0.306680903720773,0.454,0.534,1.25749163483725e-172,"PLCG2","not significant","","KEGG_VEGF_proliferation"
+2.97749221226432e-17,0.252355642422014,0.244,0.223,7.30081090447212e-13,"SOCS3","not significant","","KEGG_TNF_immune_signaling"
+8.81914779568003e-17,-0.325661734531659,0.369,0.387,2.16245503950074e-12,"SOD2","not significant","","Oxidative_Stress"
